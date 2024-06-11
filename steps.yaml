@@ -1,0 +1,205 @@
+Description:
+
+# 1: Configure Network
+# Use a CloudFormation template to deploy the networking resources required to support the application.
+CloudFormation:
+  CreateStack:
+    PrepareTemplate: 'Choose an existing template'
+    SpecifyTemplate:
+      TemplateSource: 'Amazon S3 URL'
+      AmazonS3Url: !Ref 'Task1.yaml'
+    StackName: 'VPCStack'
+
+# 2: Create Amazon RDS database
+# Deploy a highly available database for use by WordPress.
+RDS:
+  CreateDatabase:
+    ChooseADatabaseCreationMethod: 'Standard create'
+    EngineOptions: 'Aurora (MySQL Compatible)'
+    Templates: 'Production'
+    Settings:
+      DBClusterIdentifier: 'MyDBCluster'
+      MasterUsername: 'admin'
+      CredentialsManagement: 'Self managed'
+    InstanceConfiguration:
+      DBInstanceClass: 'Burstable classes'
+      InstanceType: 'db.t3.medium'
+    Availability&Durability:
+      MultiAZDeployment: 'Create an Aurora Replica or Reader node in a different AZ'
+    Connectivity:
+      VPC: !Ref LabVPC
+      DBSubnetGroup: !Ref labdbsubnetgroup
+      PublicAccess: 'No'
+      VPCSecurityGroup: 'Choose exisiting'
+      ExistingVPCSecurityGroups: 'xxxxx-RDSSecurityGroup-xxxxx'
+    Monitoring: !Not 'Enable Enhanced monitoring'
+    AdditionalConfiguration:
+      DatabaseOptions:
+        InitialDatabaseName: 'WPDatabase'
+        Encryption: !Not 'Enable encryption'
+        Maintenance: !Not 'Enable auto minor version upgrade'
+        DeletionProtection: !Not 'Enable deletion protection'
+
+# 3: Create Amazon ElastiCache for Memcached
+# Create a database caching layer using Amazon ElastiCache.
+# This provides a cache around the database for frequently run queries,
+# improving HTTP response time performance and reducing strain on the database instantiated in the previous task.
+ElastiCache:
+  CreateMemcachedCache:
+    DeploymentOption:
+      - 'Design your own cache'
+      - 'Standard create'
+    ClusterInfo:
+      Name: 'MyWPCache'
+    ClusterSettings:
+      NodeType: 'cache.t3.micro'
+      NumberOfNodes: 2
+    SelectedSecurityGroups: 'xxx-ElastiCacheSecurityGroup-xxx'
+
+# 4: Create Amazon EFS file system
+# Provision a shared storage layer using Amazon EFS that creates an NFS cluster across multiple availability zones.
+EFS:
+  CreateFileSystem: 'Customize'
+    General:
+      Name: 'myWPEFS'
+      AutomaticBackups: !Not 'Enable automatic backups'
+    Tags:
+      TagKey: 'Name'
+      TagValue: 'myWPEFS'
+    Network:
+      VPC: !Ref LabVPC
+      MountTargets:
+        'a':
+          - !Ref AppSubnet1
+          - !Ref xxxxx-EFSMountTargetSecurityGroup-xxxxx
+        'b':
+          - !Ref 'AppSubnet2'
+          - !Ref xxxxx-EFSMountTargetSecurityGroup-xxxxx
+
+# 5: Create Application Load Balancer
+# Create the Application Load Balancer and a target group.
+EC2:
+  TargetGroups:
+    CreateTargetGroup:
+      BasicConfiguration:
+        TargetType: 'Instances'
+        TargetGroupName: 'myWPTargetGroup'
+        VPC: !Ref LabVPC
+      HealthChecks:
+        HealthCheckPath: '/wp-login.php'
+        AdvancedHealthCheckSettings:
+          HealthyThreshold: 2
+          UnhealthyThreshold: 10
+          Timeout: 50
+          Interval: 60
+
+  LoadBalancers:
+    CreateLoadBalancer: 'Application Load Balancer'
+      BasicConfiguration:
+        LoadBalancerName: 'myWPAppALB'
+      NetworkMapping:
+        VPC: !Ref LabVPC
+        Mappings:
+          - !Ref PublicSubnet1
+          - !Ref PublicSubnet2
+      SecurityGroups: 'xxxxx-AppInstanceSecurityGroup-xxxxx'
+      ListenersAndRouting:
+        'HTTP:80':
+          DefaultAction: !Ref myWPTargetGroup
+
+# 6: Create launch template using CloudFormation
+# Use a CloudFormation template to deploy the WordPress user data
+# within an Amazon Elastic Compute Cloud (Amazon EC2) Auto Scaling launch template.
+# The template includes the EFS mount points and the Aurora configurations.
+CloudFormation:
+  CreateStack:
+    PrepareTemplate: 'Choose an existing template'
+    SpecifyTemplate:
+      TemplateSource: 'Amazon S3 URL'
+      AmazonS3Url: !Ref 'Task6.yaml'
+    SpecifyStackDetails:
+      StackName: 'WPLaunchConfigStack'
+      Parameters:
+        DBName: !Ref 'WPDatabase'
+        DatabaseEndpoint: !Ref Writer Endpoint
+        DatabaseUserName: !Ref 'admin'
+        DatabasePassword: !Ref Master password
+        InstanceType: 't3.medium'
+        ALBDnsName: !Ref Load Balancer DNS name
+        WPElasticFileSystemID: !Ref File system ID
+
+# 7: Create application servers by configuring Auto Scaling group and scaling policy
+# Create the WordPress application servers by configuring an Auto Scaling group and a scaling policy.
+EC2:
+  CreateAutoScalingGroup:
+    Name: 'WP-ASG'
+    LaunchTemplate: !Ref LabLaunchTemplate
+    Network:
+      VPC: !Ref LabVPC
+      AvailabilityZonesAndSubnets:
+        - !Ref AppSubnet1
+        - !Ref AppSubnet2
+    LoadBalancing:
+      - 'Attach to an existing load balancer'
+      - 'Choose from your load balancer target groups'
+      - !Ref 'myWPTargetGroup | HTTP'
+    HealthChecks: 'Turn on Elastic Load Balancing health checks'
+    Monitoring: 'Enable group metrics collection within CloudWatch'
+    GroupSize:
+      DesiredCapacity: 2
+    Scaling:
+      MinDesiredCapacity: 2
+      MaxDesiredCapacity: 4
+      AutomaticScaling: 'Target tracking scaling policy'
+    Tags:
+      Key: 'Name'
+      Value: 'wp-ha-app'
+
+# 8: Chaos testing with AWS Fault Injection Simulator
+# Test the application high availability using chaos engineering.
+# Randomly terminate EC2 instances and see if the auto scaling group and load balancer can
+# reroute the traffic to healthy hosts and start new EC2 instances to keep the required capacity.
+AWSFIS:
+  CreateExperimentFromScenario: 'Create experiment template'
+    Description: 'Terminate instances in an AZ to simulate AZ outage'
+    Name: 'TerminateInstancesinAZ'
+    Actions:
+      AddAction:
+        Name: 'TerminateInstances'
+        ActionType:
+         - 'EC2'
+         - 'aws:ec2:terminate-instances'
+    Targets:
+      'Instances-Target-1': 'Edit'
+        TargetMethod: 'Resource tags, filters and parameters'
+          ResourceTags:
+            Key: 'Name'
+            Value: 'wp-ha-app'
+          ResourceFilters:
+            AddNewFilter:
+              AttributePath: 'Placement.AvailabilityZone'
+              Values: 'us-west-2a'
+            AddNewFilter:
+              AttributePath: 'State.Name'
+              Values: 'running'
+    ServiceAccess:
+      UserAnExistingIAMRole: !Ref 'xxxx-FISRole-xxxx'
+
+# 9a: Speedup WordPress website
+# Add a content delivery network using Amazon CloudFront
+# to speed up global delivery of the WordPress application
+# then replace the Site Address (URL) with the CloudFront DNS hostname and view the public facing WordPress site created in this lab.
+CloudFormation:
+  CreateStack:
+    PrepareTemplate: 'Choose an existing template'
+    SpecifyTemplate:
+      TemplateSource: 'Amazon S3 URL'
+      AmazonS3Url: !Ref 'ChallengeTask.yaml'
+    StackName: 'WPCloudFrontStack'
+    Parameters:
+      ALBDnsName: !Ref Load Balancer DNS name
+
+# 9b: Speedup WordPress website
+# Configure WordPress to use created Elasticache for Memcached.
+# To improve the site’s response time and to reduce the strain on your backend database,
+# WordPress is configured to use Memcached as a caching layer for common requests.
